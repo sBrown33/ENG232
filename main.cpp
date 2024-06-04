@@ -18,10 +18,11 @@
 #define BAUD 57600								 // define baud
 #define BAUDRATE (((F_CPU / (BAUD * 16UL))) - 1) // set baud rate
 #define MTR_Pin PORTB1
-#define kp_val 100;		//placeholder
-#define kr_val 100;		//placeholder
+#define kp_val 0;
+#define kr_val 160000;	// 1*10^6 to acount for us		
 
 uint8_t initADCMult(uint16_t sampleRate, uint8_t sampleTime, uint8_t pinNumbers[], uint8_t numPins);
+void initPWMControl(void);
 
 uint8_t TC0_BUFF;					// Buffer value for TC0 to get correct period
 volatile uint16_t adc_value;		// variable to hold read adc value
@@ -31,26 +32,25 @@ volatile uint16_t control_value;
 
 volatile bool NEW_VALUE;
 
-uint8_t dutycycle = 127;	//placeholder (50%)
-uint8_t sample_rate = 50;	//placeholder
-uint8_t sample_time	= 200;	//placeholder
+uint8_t sample_rate = 122; //122 Hz
+uint8_t sample_time	= 61; //200 us
 uint8_t NUM_ADC_PINS = 2;
 uint8_t ADC_PINS[2] = {0, 1}; //0 meas, 1 ref
 
 int main(void)
 {
-	uint8_t initADCMult(sample_rate, sample_time, ADC_PINS, NUM_ADC_PINS);
+	if (initADCMult(sample_rate, sample_time, ADC_PINS, NUM_ADC_PINS) == 1) {
+		 exit(1);
+	}
 	
+	initPWMControl(void);
+
 	// Global enable interrupts
 	sei();
 	
     while(1)
     {
         if (NEW_VALUE) {
-// 			char buff[200];
-// 			sprintf(buff,"%u, %u\n",adc_value_arr[0], adc_value_arr[1]);
-// 			print(buff);
-			
 			control_value = controlAlg(kp_val , kr_val);
 			
 			ref_value_prev = adc_value_arr[1];
@@ -182,29 +182,38 @@ ISR(ADC_vect) {
 }
 
 uint16_t controlAlg(uint8_t kp, uint8_t kr) {
-	uint16_t val; //0-1023 0 = 0V, 1023 = 5V
-	uint16_t err; //error val
-	uint16_t diff;	//d Ref() / dt
-	uint16_t meas;  //measured pressure value
+	uint16_t val; // 0-1023, 0 = 0V, 1023 = 5V
+	uint16_t err; // error val
+	uint16_t diff;	// d/dt (Ref)
+	uint16_t meas;  // measured pressure value
 	
-	meas = 20.0/adc_value[0];
-	err = adc_value[1] - meas;
-	diff = adc_value[1] - ref_value_prev;
+	meas = 20.0 / adc_value_arr[0];
+	err = adc_value_arr[1] - meas;
+	diff = adc_value_arr[1] - ref_value_prev;
 	
-	val = kp*err + kr*diff/(2*sample_time);	//control alg might needs scaling
-	
+	val = kp * err + kr * diff / (2 * sample_time);	// control alg might need scaling
+
+	if (val < -500) {		//fitting val into a duty cycle (0-1023)
+        val = 0;
+    } else if (val > 500) {
+        val = 1023;
+    } else {
+        val = ((val + 500) * 1023) / 1000;
+    }
+
 	return val;
 } 
 
 // PWM code
-void pwm_control() {
-	TCCR2A = (1 << COM2A1) | (1 << COM2A0) | (1 << WGM22) | (1 << WGM20);		//Clear on count down, set up count up, phase correct pwm
-	TIMSK2 = (1 << TOIE0); // Enable interrupt on overflow
-	OCR2A = dutycycle; //0-255
-	TCCR2B = (1 << CS22) | (1 << CS21); // 256 prescaling 
+void initPWMControl(void) {
+	TCCR1A = (1 << COM1A1) | (1 << WGM11) | (1 << WGM10); // Set up 10-bit phase correct PWM, clear on count up, set on count down, set TOP to 1023 (0x03FF)
+	DDRB |= (1 << MTR_Pin); // Set pin B1 as output
+	TIMSK1 = (1 << TOIE1); // Enable interrupt on overflow
+	OCR1A = 511; //50% ie 0 RPM 
+	TCCR1B = (1 << CS11) | (1 << CS10); // Prescaler set to 64, start timer
 }
 
-ISR(TIMER0_OVF_vect) {
-	dutycycle = control_value >> 2; //divide by 4 (1023 = 255)
+ISR(TIMER1_OVF_vect) {
+	OCR1A = control_value; 
 }
 
